@@ -1,0 +1,108 @@
+version: "3.9"
+
+services:
+  booking_db:
+    image: postgres:16
+    container_name: booking_db
+    environment:
+      POSTGRES_DB: booking_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - booking_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d booking_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  flight_db:
+    image: postgres:16
+    container_name: flight_db
+    environment:
+      POSTGRES_DB: flight_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+    volumes:
+      - flight_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d flight_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: flight_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  flight_service:
+    build:
+      context: .
+      dockerfile: flight_service/Dockerfile
+    container_name: flight_service
+    working_dir: /app/flight_service
+    depends_on:
+      flight_db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PYTHONPATH: /app:/app/shared/generated
+      PYTHONUNBUFFERED: 1
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@flight_db:5432/flight_db
+      REDIS_URL: redis://redis:6379/0
+      GRPC_HOST: 0.0.0.0
+      GRPC_PORT: 50051
+      SERVICE_API_KEY: supersecretkey
+    ports:
+      - "50051:50051"
+    command: >
+      sh -c "poetry run alembic upgrade head &&
+             poetry run python -m app.main"
+
+  booking_service:
+    build:
+      context: .
+      dockerfile: booking_service/Dockerfile
+    container_name: booking_service
+    working_dir: /app/booking_service
+    depends_on:
+      booking_db:
+        condition: service_healthy
+      flight_service:
+        condition: service_started
+    environment:
+      PYTHONPATH: /app:/app/shared/generated
+      PYTHONUNBUFFERED: 1
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@booking_db:5432/booking_db
+      FLIGHT_SERVICE_HOST: flight_service
+      FLIGHT_SERVICE_PORT: 50051
+      FLIGHT_SERVICE_API_KEY: supersecretkey
+      GRPC_TIMEOUT_SECONDS: 3
+      GRPC_RETRY_MAX_ATTEMPTS: 3
+      GRPC_RETRY_INITIAL_BACKOFF_MS: 100
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "poetry run alembic upgrade head &&
+             poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  booking_db_data:
+  flight_db_data:
+  redis_data:
